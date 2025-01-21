@@ -1,1 +1,2 @@
-requests
+git+ssh://git@github.com/EcotechServices/Utilities.git@v0.2.0#egg=utilities
+imaplib2
