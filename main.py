@@ -29,29 +29,32 @@ class _Config:
 config = _Config()
 
 
-def sleepUnless(timeout_s, abortSleepCondition):
+def sleep_unless(timeout_s, abort_sleep_condition):
     for _ in range(timeout_s):
         time.sleep(1)
-        if abortSleepCondition():
+        if abort_sleep_condition():
             break
 
 
-def decodeMimeText(s):
-    mimeTextEncodingTuples = email.header.decode_header(s)
+def decode_mime_text(s):
+    """Decodes a MIME-encoded string. This is used to decode email headers."""
+    mime_text_encoding_tuples = email.header.decode_header(s)
     return ' '.join(
         (m[0].decode(m[1]) if m[1] is not None else (m[0].decode('utf-8') if hasattr(m[0], 'decode') else str(m[0])))
-        for m in mimeTextEncodingTuples)
+        for m in mime_text_encoding_tuples)
 
 
 # This is the threading object that does all the waiting on
 # the event
 class IMAPClientManager(object):
+    """Manages the IMAP client and the IMAP idle loop"""
     def __init__(self, imap_client, sync_callback: callable):
         self.thread = threading.Thread(target=self.idle)
         self.imap_client = imap_client
         self.event = threading.Event()
-        self.needsReset = threading.Event()
-        self.needsResetExc = None
+        self.needs_reset = threading.Event()
+        self.needs_reset_exc = None
+        self.needs_sync = False
         self.sync_callback = sync_callback
 
     def start(self):
@@ -72,13 +75,13 @@ class IMAPClientManager(object):
             # when the stop() command is given
             if self.event.is_set():
                 return
-            self.needsync = False
+            self.needs_sync = False
 
             # A callback method that gets called when a new
             # email arrives. Very basic, but that's good.
             def callback(args):
                 if not self.event.is_set():
-                    self.needsync = True
+                    self.needs_sync = True
                     self.event.set()
 
             # Do the actual idle call. This returns immediately,
@@ -86,18 +89,18 @@ class IMAPClientManager(object):
             try:
                 self.imap_client.idle(callback=callback)
             except imaplib2.IMAP4.abort as exc:
-                self.needsReset.set()
-                self.needsResetExc = exc
+                self.needs_reset.set()
+                self.needs_reset_exc = exc
             # This waits until the event is set. The event is
             # set by the callback, when the server 'answers'
             # the idle call and the callback function gets
             # called.
             self.event.wait()
-            # Because the function sets the needsync variable,
+            # Because the function sets the needs_sync variable,
             # this helps escape the loop without doing
             # anything if the stop() is called. Kinda neat
             # solution.
-            if self.needsync:
+            if self.needs_sync:
                 self.event.clear()
                 self.do_sync()
 
@@ -124,7 +127,6 @@ class EmailObserver:
         self.mailbox = mailbox
 
         self.imapClientManager = None
-        self.imapClient = None
         self.killer = GracefulKiller()
         self.observers = []
 
@@ -136,39 +138,40 @@ class EmailObserver:
         self.observers.append(observer)
 
     def start(self):
+        imap_client = None
         while True:
             try:
                 try:
                     imap_client = imaplib2.IMAP4_SSL(config.IMAP_SERVER)
                     imap_client.login(config.EMAIL_USER, config.EMAIL_PASSWORD)
                     imap_client.select(self.mailbox)  # We need to get out of the AUTH state, so we just select the INBOX.
-                    imapClientManager = IMAPClientManager(imap_client, self.fetch_newest_emails)  # Start the Idler thread
-                    imapClientManager.start()
+                    self.imapClientManager = IMAPClientManager(imap_client, self.fetch_newest_emails)  # Start the Idler thread
+                    self.imapClientManager.start()
                     logging.info('IMAP listening has started')
 
                     # Helps update the timestamp, so that on event only new emails are sent with notifications
                     self.fetch_newest_emails()
 
-                    while not self.killer.kill_now and not imapClientManager.needsReset.is_set():
+                    while not self.killer.kill_now and not self.imapClientManager.needs_reset.is_set():
                         time.sleep(1)
 
-                    if imapClientManager.needsReset.is_set():
-                        raise imapClientManager.needsResetExc  # raises instance of imaplib2.IMAP4.abort
+                    if self.imapClientManager.needs_reset.is_set():
+                        raise self.imapClientManager.needs_reset_exc  # raises instance of imaplib2.IMAP4.abort
                     elif self.killer.kill_now:
                         break
                 finally:
                     if self.imapClientManager is not None:
                         self.imapClientManager.stop()  # Had to do this stuff in a try-finally, since some testing went a little wrong.
                         self.imapClientManager.join()
-                    if self.imapClient is not None:
-                        self.imapClient.close()
-                        self.imapClient.logout()  # This is important!
+                    if imap_client is not None:
+                        imap_client.close()
+                        imap_client.logout()  # This is important!
                     logging.info('IMAP listening has stopped, conn cleanup was run for: Listener: {}, Client: {}'
-                                 .format(self.imapClientManager is not None, self.imapClient is not None))
+                                 .format(self.imapClientManager is not None, imap_client is not None))
                     sys.stdout.flush()  # probably not needed
             except imaplib2.IMAP4.abort as e:
-                retryDelay_s = 1
-                sleepUnless(retryDelay_s, lambda: self.killer.kill_now)
+                retry_delay_s = 1
+                sleep_unless(retry_delay_s, lambda: self.killer.kill_now)
                 if self.killer.kill_now:
                     break
             except socket.gaierror as e:
@@ -177,21 +180,21 @@ class EmailObserver:
 
     def fetch_newest_emails(self):
         try:
-            mail = imaplib2.IMAP4_SSL(config.IMAP_SERVER)
-            mail.login(config.EMAIL_USER, config.EMAIL_PASSWORD)
-            mail.select(self.mailbox)
+            imap_client = imaplib2.IMAP4_SSL(config.IMAP_SERVER)
+            imap_client.login(config.EMAIL_USER, config.EMAIL_PASSWORD)
+            imap_client.select(self.mailbox)
 
-            result, data = mail.search(None, "ALL")
+            result, data = imap_client.search(None, "ALL")
             email_ids = data[0].split()
-            searchLimit = int(config.EMAIL_SEARCH_DEPTH)
+            search_limit = int(config.EMAIL_SEARCH_DEPTH)
 
-            for i in reversed(email_ids[-searchLimit:]):
-                result, msg_data = mail.fetch(i, "(RFC822)")
+            for i in reversed(email_ids[-search_limit:]):
+                result, msg_data = imap_client.fetch(i, "(RFC822)")
                 raw_email = msg_data[0][1].decode("utf-8")
                 message = email.message_from_string(raw_email)
 
-                subject = decodeMimeText(message["Subject"])
-                sender = decodeMimeText(message["From"])
+                subject = decode_mime_text(message["Subject"])
+                sender = decode_mime_text(message["From"])
                 logging.info(f"<{sender}> {subject}")
 
             if self._prev_email_timestamp_temp_new is not None:
@@ -218,6 +221,5 @@ if __name__ == '__main__':
     # Add the handler to the logger
     logger.addHandler(console_handler)
 
-
-    e = EmailObserver()
-    e.start()
+    eo = EmailObserver()
+    eo.start()
