@@ -1,33 +1,15 @@
 # coding=utf-8
-import logging
-import email
-import email.parser
-import email.header
-import socket
-import imaplib2
-import threading
+import os
 import sys
 import time
+import email
+import socket
 import signal
-
-
-class _Config:
-    IMAP_SERVER = None
-    EMAIL_USER = None
-    EMAIL_PASSWORD = None
-    EMAIL_SEARCH_DEPTH = None
-
-    def __init__(self):
-        for key in [a for a in dir(self) if not a.startswith('__') and not callable(getattr(self, a))]:
-            import configVals_example
-            getattr(configVals_example, key)  # Only to help remember to update the example config file
-
-            import configVals
-            setattr(self, key, getattr(configVals, key))
-
-
-config = _Config()
-
+import logging
+import imaplib2
+import threading
+import email.parser
+import email.header
 
 def sleep_unless(timeout_s, abort_sleep_condition):
     for _ in range(timeout_s):
@@ -123,8 +105,30 @@ class GracefulKiller:
 
 
 class EmailObserver:
-    def __init__(self, mailbox='Inbox'):
+    def __init__(self, imap_server=None, email_user=None, email_password=None, search_depth=10, mailbox='Inbox', imap_port=None, **kwargs):
+        self.imap_server = imap_server
+        self.email_user = email_user
+        self.email_password = email_password
+        self.search_depth = search_depth
         self.mailbox = mailbox
+        self.imap_port = imap_port
+
+        # Load email server credentials from environment variables if not provided
+        imap_server_env = kwargs.get("imap_server_env") or "EMAIL_OBSERVER_IMAP_SERVER"
+        email_user_env = kwargs.get("email_user_env") or "EMAIL_OBSERVER_USER"
+        email_password_env = kwargs.get("email_password_env") or "EMAIL_OBSERVER_PASSWORD"
+        if not self.imap_server:
+            self.imap_server = os.getenv(imap_server_env)
+        if not self.email_user:
+            self.email_user = os.getenv(email_user_env)
+        if not self.email_password:
+            self.email_password = os.getenv(email_password_env)
+        if not all((self.imap_server, self.email_user, self.email_password)):
+            raise EnvironmentError(
+                "{}, {}, and {} must be set as environment variables, or values must be passed in as arguments to {} constructor.".format(
+                    imap_server_env, email_user_env, email_password_env, self.__class__.__name__
+                )
+            )
 
         self.imapClientManager = None
         self.killer = GracefulKiller()
@@ -142,8 +146,8 @@ class EmailObserver:
         while True:
             try:
                 try:
-                    imap_client = imaplib2.IMAP4_SSL(config.IMAP_SERVER)
-                    imap_client.login(config.EMAIL_USER, config.EMAIL_PASSWORD)
+                    imap_client = imaplib2.IMAP4_SSL(self.imap_server, self.imap_port)
+                    imap_client.login(self.email_user, self.email_password)
                     imap_client.select(self.mailbox)  # We need to get out of the AUTH state, so we just select the INBOX.
                     self.imapClientManager = IMAPClientManager(imap_client, self.fetch_newest_emails)  # Start the Idler thread
                     self.imapClientManager.start()
@@ -180,13 +184,13 @@ class EmailObserver:
 
     def fetch_newest_emails(self):
         try:
-            imap_client = imaplib2.IMAP4_SSL(config.IMAP_SERVER)
-            imap_client.login(config.EMAIL_USER, config.EMAIL_PASSWORD)
+            imap_client = imaplib2.IMAP4_SSL(self.imap_server, self.imap_port)
+            imap_client.login(self.email_user, self.email_password)
             imap_client.select(self.mailbox)
 
             result, data = imap_client.search(None, "ALL")
             email_ids = data[0].split()
-            search_limit = int(config.EMAIL_SEARCH_DEPTH)
+            search_limit = int(self.search_depth)
 
             for i in reversed(email_ids[-search_limit:]):
                 result, msg_data = imap_client.fetch(i, "(RFC822)")
@@ -196,6 +200,9 @@ class EmailObserver:
                 subject = decode_mime_text(message["Subject"])
                 sender = decode_mime_text(message["From"])
                 logging.info(f"<{sender}> {subject}")
+                for observer in self.observers:
+                    if callable(observer):
+                        observer()
 
             if self._prev_email_timestamp_temp_new is not None:
                 self._prev_email_timestamp = self._prev_email_timestamp_temp_new
@@ -221,5 +228,8 @@ if __name__ == '__main__':
     # Add the handler to the logger
     logger.addHandler(console_handler)
 
-    eo = EmailObserver()
-    eo.start()
+    try:
+        eo = EmailObserver()
+        eo.start()
+    except EnvironmentError as _e:
+        logging.error(_e)
