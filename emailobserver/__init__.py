@@ -1,2 +1,2 @@
 # __init__.py
-from .email_observer import EmailObserver
+from .email_notifier import EmailNotifier

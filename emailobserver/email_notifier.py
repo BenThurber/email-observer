@@ -11,6 +11,7 @@ import threading
 import email.parser
 import email.header
 
+
 def sleep_unless(timeout_s, abort_sleep_condition):
     for _ in range(timeout_s):
         time.sleep(1)
@@ -104,7 +105,7 @@ class GracefulKiller:
         self.kill_now = True
 
 
-class EmailObserver:
+class EmailNotifier:
     def __init__(self, imap_server=None, email_user=None, email_password=None, search_depth=10, mailbox='Inbox', imap_port=None, **kwargs):
         self.imap_server = imap_server
         self.email_user = email_user
@@ -229,7 +230,7 @@ if __name__ == '__main__':
     logger.addHandler(console_handler)
 
     try:
-        eo = EmailObserver()
+        eo = EmailNotifier()
         eo.start()
     except EnvironmentError as _e:
         logging.error(_e)
