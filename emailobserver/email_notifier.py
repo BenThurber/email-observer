@@ -10,6 +10,7 @@ import imaplib2
 import threading
 import email.parser
 import email.header
+from abc import ABC, abstractmethod
 
 
 def sleep_unless(timeout_s, abort_sleep_condition):
@@ -25,6 +26,21 @@ def decode_mime_text(s):
     return ' '.join(
         (m[0].decode(m[1]) if m[1] is not None else (m[0].decode('utf-8') if hasattr(m[0], 'decode') else str(m[0])))
         for m in mime_text_encoding_tuples)
+
+
+class EmailObserver(ABC):
+    """This is an Abstract class which serves as an interface.  Any classes
+    that wish to receive notifications of new emails can implement this class,
+    possibly using multiple inheritance.  For example:
+
+    class MyClass(MyClassSuperclass, EmailObserver):
+        def on_mail_received(...):
+            ...
+    """
+
+    @abstractmethod
+    def on_mail_received(self, new_messages: list, all_messages: list):
+        pass
 
 
 # This is the threading object that does all the waiting on
@@ -106,6 +122,9 @@ class GracefulKiller:
 
 
 class EmailNotifier:
+    """This is the subject which maintains a list of observers.  When one or
+    more emails are received, all observers are notified by calling their
+    on_mail_received method."""
     def __init__(self, imap_server=None, email_user=None, email_password=None, search_depth=10, mailbox='Inbox', imap_port=None, **kwargs):
         self.imap_server = imap_server
         self.email_user = email_user
@@ -132,15 +151,15 @@ class EmailNotifier:
             )
 
         self.imapClientManager = None
+        self.cache = {}
         self.killer = GracefulKiller()
         self.observers = []
 
-        self._prev_email_timestamp = "Sat, 01 Jan 2000 00:00:00 +0000"
-        self._prev_email_timestamp_temp_new = None
-
-    def register_observer(self, observer):
-        # ToDo WIP
-        self.observers.append(observer)
+    def register_observer(self, observer: EmailObserver):
+        if isinstance(observer, EmailObserver):
+            self.observers.append(observer)
+        else:
+            raise TypeError(f"observer of type {observer.__class__.__name__} is not a subclass of EmailObserver.")
 
     def start(self):
         imap_client = None
@@ -155,7 +174,7 @@ class EmailNotifier:
                     logging.info('IMAP listening has started')
 
                     # Helps update the timestamp, so that on event only new emails are sent with notifications
-                    self.fetch_newest_emails()
+                    self.fetch_newest_emails(first_fetch=True)
 
                     while not self.killer.kill_now and not self.imapClientManager.needs_reset.is_set():
                         time.sleep(1)
@@ -183,7 +202,8 @@ class EmailNotifier:
                 logging.error(f"Failed to connect to IMAP server: {e}")
                 break
 
-    def fetch_newest_emails(self):
+    def fetch_newest_emails(self, first_fetch=False):
+        imap_client = None
         try:
             imap_client = imaplib2.IMAP4_SSL(self.imap_server, self.imap_port)
             imap_client.login(self.email_user, self.email_password)
@@ -193,24 +213,37 @@ class EmailNotifier:
             email_ids = data[0].split()
             search_limit = int(self.search_depth)
 
+            new_cache = {}
+            new_messages = []
             for i in reversed(email_ids[-search_limit:]):
+                if i in self.cache:
+                    new_cache[i] = self.cache[i]
+                    continue
+
                 result, msg_data = imap_client.fetch(i, "(RFC822)")
                 raw_email = msg_data[0][1].decode("utf-8")
                 message = email.message_from_string(raw_email)
+                new_cache[i] = message
+                new_messages.append(message)
 
-                subject = decode_mime_text(message["Subject"])
-                sender = decode_mime_text(message["From"])
-                logging.info(f"<{sender}> {subject}")
-                for observer in self.observers:
-                    if callable(observer):
-                        observer()
+            if new_cache == self.cache:
+                return
 
-            if self._prev_email_timestamp_temp_new is not None:
-                self._prev_email_timestamp = self._prev_email_timestamp_temp_new
-                self._prev_email_timestamp_temp_new = None
+            self.cache = new_cache
+            all_messages = list(new_cache.values())
+            if first_fetch:
+                new_messages.clear()  # The first time loading messages so there should be no new messages.
+
+            for observer in self.observers:
+                observer.on_mail_received(new_messages, all_messages)
 
         except (imaplib2.IMAP4.error, socket.gaierror) as e:
             logging.error(f"Failed to connect to IMAP server: {e}")
+
+        finally:
+            if imap_client is not None:
+                imap_client.close()
+                imap_client.logout()  # This is important!
 
 
 if __name__ == '__main__':
@@ -230,7 +263,7 @@ if __name__ == '__main__':
     logger.addHandler(console_handler)
 
     try:
-        eo = EmailNotifier()
-        eo.start()
+        en = EmailNotifier()
+        en.start()
     except EnvironmentError as _e:
         logging.error(_e)

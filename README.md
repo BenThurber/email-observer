@@ -18,12 +18,19 @@ pip install emailobserver
 
 ### 3.2. Basic Usage
 
-```python
-from emailobserver import EmailNotifier
+An [observer pattern](https://en.wikipedia.org/wiki/Observer_pattern) is used for processing incoming emails.  To receive email events, a class must implement the on_mail_received method of the EmailObserver class.
 
-callback = lambda: print('New email received!')
+```python
+from emailobserver import EmailNotifier, EmailObserver
+
+class Observer(EmailObserver):
+    def on_mail_received(self, new_messages: list, all_messages: list):
+        print("Message received!")
+
+observer = Observer()
+
 notifier = EmailNotifier('imap.gmail.com', 'someuser@gmail.com', 'password')
-notifier.register_observer(callback)
+notifier.register_observer(observer)
 notifier.start()
 ```
 
@@ -31,9 +38,9 @@ notifier.start()
 
 Authentication with a mail server requires a **mail server address**, **username**, and **password**.  These can be provided in three ways:
 
-By setting the environment variables `EMAIL_OBSERVER_IMAP_SERVER`, `EMAIL_OBSERVER_USER`, and `EMAIL_OBSERVER_PASSWORD`.
+1. By setting the environment variables `EMAIL_OBSERVER_IMAP_SERVER`, `EMAIL_OBSERVER_USER`, and `EMAIL_OBSERVER_PASSWORD`.
 
-Directly in the `EmailNotifier` constructor:
+2. Directly in the `EmailNotifier` constructor:
 
 ```python
 from emailobserver import EmailNotifier
@@ -41,7 +48,7 @@ from emailobserver import EmailNotifier
 notifier = EmailNotifier('imap.gmail.com', 'someuser@gmail.com', 'password')
 ```
 
-Or by specifying custom names for environment variables:
+3. Or by specifying custom names for environment variables:
 
 ```python
 from emailobserver import EmailNotifier
