@@ -10,6 +10,7 @@ import imaplib2
 import threading
 import email.parser
 import email.header
+from email.message import Message
 from abc import ABC, abstractmethod
 
 
@@ -37,9 +38,8 @@ class EmailObserver(ABC):
         def on_mail_received(...):
             ...
     """
-
     @abstractmethod
-    def on_mail_received(self, new_messages: list, all_messages: list):
+    def on_mail_received(self, new_messages: list[Message], message_list: list[Message]):
         pass
 
 
@@ -125,11 +125,12 @@ class EmailNotifier:
     """This is the subject which maintains a list of observers.  When one or
     more emails are received, all observers are notified by calling their
     on_mail_received method."""
-    def __init__(self, imap_server=None, email_user=None, email_password=None, search_depth=10, mailbox='Inbox', imap_port=None, **kwargs):
+    def __init__(self, imap_server=None, email_user=None, email_password=None, message_list_len=10, mailbox='Inbox', imap_port=None, **kwargs):
+        self._first = True
         self.imap_server = imap_server
         self.email_user = email_user
         self.email_password = email_password
-        self.search_depth = search_depth
+        self.message_list_len = message_list_len
         self.mailbox = mailbox
         self.imap_port = imap_port
 
@@ -151,9 +152,10 @@ class EmailNotifier:
             )
 
         self.imapClientManager = None
-        self.cache = {}
         self.killer = GracefulKiller()
         self.observers = []
+        self.prev_message_list_dict = {}
+        self.prev_uids = set()
 
     def register_observer(self, observer: EmailObserver):
         if isinstance(observer, EmailObserver):
@@ -174,7 +176,7 @@ class EmailNotifier:
                     logging.info('IMAP listening has started')
 
                     # Helps update the timestamp, so that on event only new emails are sent with notifications
-                    self.fetch_newest_emails(first_fetch=True)
+                    self.fetch_newest_emails()
 
                     while not self.killer.kill_now and not self.imapClientManager.needs_reset.is_set():
                         time.sleep(1)
@@ -202,40 +204,39 @@ class EmailNotifier:
                 logging.error(f"Failed to connect to IMAP server: {e}")
                 break
 
-    def fetch_newest_emails(self, first_fetch=False):
+    def fetch_newest_emails(self):
         imap_client = None
         try:
             imap_client = imaplib2.IMAP4_SSL(self.imap_server, self.imap_port)
             imap_client.login(self.email_user, self.email_password)
             imap_client.select(self.mailbox)
 
-            result, data = imap_client.search(None, "ALL")
-            email_ids = data[0].split()
-            search_limit = int(self.search_depth)
+            result, data = imap_client.uid('SEARCH', None, 'ALL')
+            uids = data[0].split()
+            all_uids = {int(b) for b in data[0].split()}
 
-            new_cache = {}
-            new_messages = []
-            for i in reversed(email_ids[-search_limit:]):
-                if i in self.cache:
-                    new_cache[i] = self.cache[i]
-                    continue
+            uids_to_fetch = reversed([int(b) for b in data[0].split()[-self.message_list_len:]])
 
-                result, msg_data = imap_client.fetch(i, "(RFC822)")
-                raw_email = msg_data[0][1].decode("utf-8")
-                message = email.message_from_string(raw_email)
-                new_cache[i] = message
-                new_messages.append(message)
+            message_list_dict = {uid: self.prev_message_list_dict.get(uid) or self.fetch_uid(imap_client, uid) for uid in uids_to_fetch}
+            message_list = list(message_list_dict.values())
 
-            if new_cache == self.cache:
+            if self._first:
+                self._first = False
+                new_messages = []
+            else:
+                new_uids = all_uids.difference(self.prev_uids)  # Should be very fast, even for a large mailbox.
+                new_messages = [message_list_dict.get(uid) or self.fetch_uid(imap_client, uid) for uid in new_uids]
+
+            # IDLE is triggered when the read status is changed on an email.
+            # This check prevents observers from being notified.
+            if message_list_dict.keys() == self.prev_message_list_dict.keys():
                 return
 
-            self.cache = new_cache
-            all_messages = list(new_cache.values())
-            if first_fetch:
-                new_messages.clear()  # The first time loading messages so there should be no new messages.
+            self.prev_message_list_dict = message_list_dict
+            self.prev_uids = all_uids
 
             for observer in self.observers:
-                observer.on_mail_received(new_messages, all_messages)
+                observer.on_mail_received(new_messages, message_list)
 
         except (imaplib2.IMAP4.error, socket.gaierror) as e:
             logging.error(f"Failed to connect to IMAP server: {e}")
@@ -244,6 +245,17 @@ class EmailNotifier:
             if imap_client is not None:
                 imap_client.close()
                 imap_client.logout()  # This is important!
+
+    @staticmethod
+    def fetch_uid(imap_client, uid: int) -> Message:
+        """Fetches the email message with the given UID from the IMAP server."""
+        if not isinstance(uid, int):
+            raise TypeError(f"uid {uid} must be an integer, not {uid.__class__.__name__}")
+        result, msg_data = imap_client.uid('FETCH', str(uid), '(RFC822)')
+        # ToDo add error handling for non 'OK' result and None msg_data.
+        raw_email = msg_data[0][1].decode("utf-8")
+        message = email.message_from_string(raw_email)
+        return message
 
 
 if __name__ == '__main__':
