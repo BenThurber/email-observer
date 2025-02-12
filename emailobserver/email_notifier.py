@@ -195,7 +195,7 @@ class EmailNotifier:
                     logging.info('IMAP listening has stopped, conn cleanup was run for: Listener: {}, Client: {}'
                                  .format(self.imapClientManager is not None, imap_client is not None))
                     sys.stdout.flush()  # probably not needed
-            except imaplib2.IMAP4.abort as e:
+            except imaplib2.IMAP4.abort:
                 retry_delay_s = 1
                 sleep_unless(retry_delay_s, lambda: self.killer.kill_now)
                 if self.killer.kill_now:
@@ -212,7 +212,6 @@ class EmailNotifier:
             imap_client.select(self.mailbox)
 
             result, data = imap_client.uid('SEARCH', None, 'ALL')
-            uids = data[0].split()
             all_uids = {int(b) for b in data[0].split()}
 
             uids_to_fetch = reversed([int(b) for b in data[0].split()[-self.message_list_len:]])
