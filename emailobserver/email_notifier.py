@@ -11,7 +11,9 @@ import threading
 import email.parser
 import email.header
 from email.message import Message
+from collections import namedtuple
 from abc import ABC, abstractmethod
+from typing import Iterable, Literal
 
 
 def sleep_unless(timeout_s, abort_sleep_condition):
@@ -39,7 +41,7 @@ class EmailObserver(ABC):
             ...
     """
     @abstractmethod
-    def on_mail_received(self, new_messages: list[Message], message_list: list[Message]):
+    def on_mail_received(self, new_messages: list[tuple[dict, Message]], message_list: list[tuple[dict, Message]]):
         pass
 
 
@@ -125,13 +127,16 @@ class EmailNotifier:
     """This is the subject which maintains a list of observers.  When one or
     more emails are received, all observers are notified by calling their
     on_mail_received method."""
-    def __init__(self, imap_server=None, email_user=None, email_password=None, message_list_len=10, mailbox='Inbox', imap_port=None, **kwargs):
+    def __init__(self, imap_server=None, email_user=None, email_password=None, message_list_len=10, mailbox='Inbox',
+                 order_by: Literal['INTERNALDATE', 'UID', 'MSN'] = 'INTERNALDATE', imap_port=None,
+                 trigger_on_flag_changes=False, **kwargs):
         self._first = True
         self.imap_server = imap_server
         self.email_user = email_user
         self.email_password = email_password
         self.message_list_len = message_list_len
         self.mailbox = mailbox
+        self.order_by = order_by
         self.imap_port = imap_port
 
         # Load email server credentials from environment variables if not provided
@@ -153,9 +158,17 @@ class EmailNotifier:
 
         self.imapClientManager = None
         self.killer = GracefulKiller()
+        # ToDo fields with dots like 'RFC822.SIZE' are not supported by namedtuple
+        self.fetch_options = {'FLAGS', 'INTERNALDATE', 'UID'}
+        self.fetch_options.add('UID')  # ToDo Always needs UID??
         self.observers = []
-        self.prev_message_list_dict = {}
-        self.prev_uids = set()
+        self.prev_attributes_dict = {}  # This is used to determine which new emails have been received
+        self.prev_message_list_dict = {}  # This acts as a cache of fetched emails
+
+        if self.order_by == 'UID' or self.order_by == 'MSN':
+            self._order_by_key_func = lambda x: int(x)
+        else:
+            self._order_by_key_func = lambda date: date.strip('"')  # ToDo parse date string here into datetime.datetime obj
 
     def register_observer(self, observer: EmailObserver):
         if isinstance(observer, EmailObserver):
@@ -204,6 +217,42 @@ class EmailNotifier:
                 logging.error(f"Failed to connect to IMAP server: {e}")
                 break
 
+    @staticmethod
+    def parse_response(fields: Iterable[str], response_bytes: list[bytes]) -> dict:
+        """Parses a list of bytes of the form b'MSN (field1 value1 field2 value2 ...)' into a list of namedtuples.
+        For example: b'1 (FLAGS (\\Seen) INTERNALDATE "25-Dec-2024 08:59:44 +0000" UID 1)'
+        Each bytes object contains the same fields, in the same order.  The fields variable must contain all the field
+        names in the data (order does not matter)."""
+        # ToDo this function has a bug.  If one of the field names is contained in a fetched value, it will break
+        # ToDo use imaplib2.ParseFlags, imaplib2.Internaldate2Time (maybe others) to parse response
+        if 'UID' not in fields:
+            raise ValueError("UID must be in fields.")
+        if len(response_bytes) == 0:
+            return {}
+
+        response_list: list[str] = list(map(bytes.decode, response_bytes))  # Decode bytes to utf-8 strings
+
+        # Sort fields by their position in the data.  Also converts fields to a list.
+        fields = sorted(fields, key=lambda field: response_list[0].index(field))
+
+        Attributes = namedtuple('Attributes', fields + ['MSN'])  # MSN == message sequence number
+        values = [""] * (len(fields) + 1)
+
+        # We extract data here by slicing strings based on the position of each field.
+        attributes_dict = {}
+        uid_index = fields.index('UID')
+        for d in response_list:
+            for i, f in enumerate(fields[:-1]):
+                values[i] = d[d.index(f) + len(f) + 1: d.index(fields[i+1]) - 1]
+            values[-2] = d[d.index(fields[-1]) + len(fields[-1]) + 1:-1]
+            # Slice d to -1 here because there is a closing parenthesis at the end of the data.
+            values[-1] = d[:d.index(' ')]  # MSN
+
+            attributes = Attributes(*values)
+            attributes_dict[int(attributes[uid_index])] = attributes
+
+        return attributes_dict
+
     def fetch_newest_emails(self):
         imap_client = None
         try:
@@ -211,20 +260,33 @@ class EmailNotifier:
             imap_client.login(self.email_user, self.email_password)
             imap_client.select(self.mailbox)
 
-            result, data = imap_client.uid('SEARCH', None, 'ALL')
-            all_uids = {int(b) for b in data[0].split()}
+            options_payload = '({})'.format(' '.join(self.fetch_options))
+            result, byte_data = imap_client.fetch(message_set="1:*", message_parts=options_payload)
 
-            uids_to_fetch = reversed([int(b) for b in data[0].split()[-self.message_list_len:]])
+            attributes_dict = self.parse_response(self.fetch_options, byte_data)
 
-            message_list_dict = {uid: self.prev_message_list_dict.get(uid) or self.fetch_uid(imap_client, uid) for uid in uids_to_fetch}
-            message_list = list(message_list_dict.values())
+            # Indexing the namedtuple is faster than using t.UID in every set comprehension iteration
+            # i = message_data_dict[0]._fields.find('UID') if len(message_data_dict) >= 1 else None
+            # all_uids = {int(tup[i]) for tup in message_data_dict}
+            attributes_sorted = sorted(attributes_dict.values(), key=lambda x: x.UID) # ToDo use self._order_by_key_func
+            # uids_to_fetch = reversed([int(tup[i]) for tup in message_data_dict[-self.message_list_len:]])
+            uids_to_fetch = [int(tup.UID) for tup in attributes_sorted[-self.message_list_len:]]
 
-            if self._first:
+            # ToDo instead of sending requests in a loop, try to use IMAP4.uid with id ranges.  May also be able to use IMAP4.fetch since we have access to the MSN?
+            message_list_dict = {}
+            for uid in uids_to_fetch:
+                if uid in self.prev_message_list_dict:
+                    message_list_dict[uid] = (attributes_dict[uid]._asdict(), self.prev_message_list_dict[uid][1])
+                else:
+                    message_list_dict[uid] = (attributes_dict[uid]._asdict(), self.fetch_uid(imap_client, uid))
+
+            if not self._first:
+                # Set-like operation, should be fast
+                new_uids = attributes_dict.keys() - self.prev_attributes_dict.keys()
+                new_messages = [message_list_dict.get(uid) or (attributes_dict[uid]._asdict(), self.fetch_uid(imap_client, uid)) for uid in new_uids]
+            else:
                 self._first = False
                 new_messages = []
-            else:
-                new_uids = all_uids.difference(self.prev_uids)  # Should be very fast, even for a large mailbox.
-                new_messages = [message_list_dict.get(uid) or self.fetch_uid(imap_client, uid) for uid in new_uids]
 
             # IDLE is triggered when the read status is changed on an email.
             # This check prevents observers from being notified.
@@ -232,8 +294,9 @@ class EmailNotifier:
                 return
 
             self.prev_message_list_dict = message_list_dict
-            self.prev_uids = all_uids
+            self.prev_attributes_dict = attributes_dict
 
+            message_list = list(message_list_dict.values())  # ToDo sort lists that are sent to observer
             for observer in self.observers:
                 observer.on_mail_received(new_messages, message_list)
 
