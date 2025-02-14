@@ -39,7 +39,7 @@ class EmailObserver(ABC):
             ...
     """
     @abstractmethod
-    def on_mail_received(self, new_messages: list[Message], message_list: list[Message]):
+    def on_mail_received(self, new_messages: list[Message]):
         pass
 
 
@@ -125,12 +125,11 @@ class EmailNotifier:
     """This is the subject which maintains a list of observers.  When one or
     more emails are received, all observers are notified by calling their
     on_mail_received method."""
-    def __init__(self, imap_server=None, email_user=None, email_password=None, message_list_len=10, mailbox='Inbox', imap_port=None, **kwargs):
+    def __init__(self, imap_server=None, email_user=None, email_password=None, mailbox='Inbox', imap_port=None, **kwargs):
         self._first = True
         self.imap_server = imap_server
         self.email_user = email_user
         self.email_password = email_password
-        self.message_list_len = message_list_len
         self.mailbox = mailbox
         self.imap_port = imap_port
 
@@ -154,7 +153,6 @@ class EmailNotifier:
         self.imapClientManager = None
         self.killer = GracefulKiller()
         self.observers = []
-        self.prev_message_list_dict = {}
         self.prev_uids = set()
 
     def register_observer(self, observer: EmailObserver):
@@ -214,28 +212,17 @@ class EmailNotifier:
             result, data = imap_client.uid('SEARCH', None, 'ALL')
             all_uids = {int(b) for b in data[0].split()}
 
-            uids_to_fetch = reversed([int(b) for b in data[0].split()[-self.message_list_len:]])
-
-            message_list_dict = {uid: self.prev_message_list_dict.get(uid) or self.fetch_uid(imap_client, uid) for uid in uids_to_fetch}
-            message_list = list(message_list_dict.values())
-
             if self._first:
                 self._first = False
                 new_messages = []
             else:
                 new_uids = all_uids.difference(self.prev_uids)  # Should be very fast, even for a large mailbox.
-                new_messages = [message_list_dict.get(uid) or self.fetch_uid(imap_client, uid) for uid in new_uids]
+                new_messages = [self.fetch_uid(imap_client, uid) for uid in new_uids]
 
-            # IDLE is triggered when the read status is changed on an email.
-            # This check prevents observers from being notified.
-            if message_list_dict.keys() == self.prev_message_list_dict.keys():
-                return
-
-            self.prev_message_list_dict = message_list_dict
             self.prev_uids = all_uids
 
             for observer in self.observers:
-                observer.on_mail_received(new_messages, message_list)
+                observer.on_mail_received(new_messages)
 
         except (imaplib2.IMAP4.error, socket.gaierror) as e:
             logging.error(f"Failed to connect to IMAP server: {e}")
