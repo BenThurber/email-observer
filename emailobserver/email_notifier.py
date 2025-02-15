@@ -125,24 +125,25 @@ class EmailNotifier:
     """This is the subject which maintains a list of observers.  When one or
     more emails are received, all observers are notified by calling their
     on_mail_received method."""
-    def __init__(self, imap_server=None, email_user=None, email_password=None, mailbox='Inbox', imap_port=None, **kwargs):
+    def __init__(self, email_user=None, email_password=None, imap_server=None, mailbox='Inbox', imap_port=None, **kwargs):
         self._first = True
-        self.imap_server = imap_server
         self.email_user = email_user
         self.email_password = email_password
+        self.imap_server = imap_server
         self.mailbox = mailbox
         self.imap_port = imap_port
 
         # Load email server credentials from environment variables if not provided
-        imap_server_env = kwargs.get("imap_server_env") or "EMAIL_OBSERVER_IMAP_SERVER"
         email_user_env = kwargs.get("email_user_env") or "EMAIL_OBSERVER_USER"
         email_password_env = kwargs.get("email_password_env") or "EMAIL_OBSERVER_PASSWORD"
-        if not self.imap_server:
-            self.imap_server = os.getenv(imap_server_env)
+        imap_server_env = kwargs.get("imap_server_env") or "EMAIL_OBSERVER_IMAP_SERVER"
         if not self.email_user:
             self.email_user = os.getenv(email_user_env)
         if not self.email_password:
             self.email_password = os.getenv(email_password_env)
+        if not self.imap_server:
+            self.imap_server = os.getenv(imap_server_env)
+
         if not all((self.imap_server, self.email_user, self.email_password)):
             raise EnvironmentError(
                 "{}, {}, and {} must be set as environment variables, or values must be passed in as arguments to {} constructor.".format(
