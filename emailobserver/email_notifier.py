@@ -1,5 +1,5 @@
-# coding=utf-8
 import os
+import re
 import sys
 import time
 import email
@@ -153,7 +153,8 @@ class EmailNotifier:
         self.imapClientManager = None
         self.killer = GracefulKiller()
         self.observers = []
-        self.prev_uids = set()
+        self.uidnext = None
+        self.uidvalidity = None
 
     def register_observer(self, observer: EmailObserver):
         if isinstance(observer, EmailObserver):
@@ -169,12 +170,17 @@ class EmailNotifier:
                     imap_client = imaplib2.IMAP4_SSL(self.imap_server, self.imap_port)
                     imap_client.login(self.email_user, self.email_password)
                     imap_client.select(self.mailbox)  # We need to get out of the AUTH state, so we just select the INBOX.
+
+                    null_uidnext_uidvalidity = self.uidnext is None or self.uidvalidity is None
+                    if null_uidnext_uidvalidity:
+                        self.uidnext, self.uidvalidity = self.get_uidnext_uidvalidity(imap_client)
+
                     self.imapClientManager = IMAPClientManager(imap_client, self.fetch_newest_emails)  # Start the Idler thread
                     self.imapClientManager.start()
                     logging.info('IMAP listening has started')
 
-                    # Helps update the timestamp, so that on event only new emails are sent with notifications
-                    self.fetch_newest_emails()
+                    if not null_uidnext_uidvalidity:
+                        self.fetch_newest_emails()
 
                     while not self.killer.kill_now and not self.imapClientManager.needs_reset.is_set():
                         time.sleep(1)
@@ -202,27 +208,41 @@ class EmailNotifier:
                 logging.error(f"Failed to connect to IMAP server: {e}")
                 break
 
+    def get_uidnext_uidvalidity(self, imap_client):
+        result, response = imap_client.status(self.mailbox, "(UIDNEXT UIDVALIDITY)")
+        content = response[0].decode()
+        # ToDo look into using parsing from imapclient??  Add error handling.
+        pattern = r'.* \(.*{} (\d+).*\)'
+        uidnext = re.match(pattern.format('UIDNEXT'), content).group(1)
+        uidvalidity = re.match(pattern.format('UIDVALIDITY'), content).group(1)
+        return int(uidnext), int(uidvalidity)  # UIDNEXT and UIDVALIDITY will always be integers as per (RFC 3501)
+
     def fetch_newest_emails(self):
         imap_client = None
         try:
             imap_client = imaplib2.IMAP4_SSL(self.imap_server, self.imap_port)
             imap_client.login(self.email_user, self.email_password)
             imap_client.select(self.mailbox)
+            uidnext, uidvalidity = self.get_uidnext_uidvalidity(imap_client)
+            assert self.uidnext is not None
+            assert self.uidvalidity is not None
+            # ToDo deal with UIDVALIDITY changes
+            self.uidvalidity = uidvalidity
 
-            result, data = imap_client.uid('SEARCH', None, 'ALL')
-            all_uids = {int(b) for b in data[0].split()}
+            result, msg_data = imap_client.uid('FETCH', f'{self.uidnext}:*', '(RFC822)')
+            self.uidnext = uidnext
 
-            if self._first:
-                self._first = False
-                new_messages = []
-            else:
-                new_uids = all_uids.difference(self.prev_uids)  # Should be very fast, even for a large mailbox.
-                new_messages = [self.fetch_uid(imap_client, uid) for uid in new_uids]
+            messages = []
+            for data in msg_data:
+                if data is None or data == b')':
+                    continue
+                metadata, raw_email = data
+                message = email.message_from_bytes(raw_email)
+                messages.append(message)
 
-            self.prev_uids = all_uids
-
-            for observer in self.observers:
-                observer.on_mail_received(new_messages)
+            if len(messages) > 0:
+                for observer in self.observers:
+                    observer.on_mail_received(messages)
 
         except (imaplib2.IMAP4.error, socket.gaierror) as e:
             logging.error(f"Failed to connect to IMAP server: {e}")
@@ -231,17 +251,6 @@ class EmailNotifier:
             if imap_client is not None:
                 imap_client.close()
                 imap_client.logout()  # This is important!
-
-    @staticmethod
-    def fetch_uid(imap_client, uid: int) -> Message:
-        """Fetches the email message with the given UID from the IMAP server."""
-        if not isinstance(uid, int):
-            raise TypeError(f"uid {uid} must be an integer, not {uid.__class__.__name__}")
-        result, msg_data = imap_client.uid('FETCH', str(uid), '(RFC822)')
-        # ToDo add error handling for non 'OK' result and None msg_data.
-        raw_email = msg_data[0][1].decode("utf-8")
-        message = email.message_from_string(raw_email)
-        return message
 
 
 if __name__ == '__main__':
