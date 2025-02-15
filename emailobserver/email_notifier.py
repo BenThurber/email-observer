@@ -178,7 +178,7 @@ class EmailNotifier:
 
                     self.imapClientManager = IMAPClientManager(imap_client, self.fetch_newest_emails)  # Start the Idler thread
                     self.imapClientManager.start()
-                    logging.info('IMAP listening has started')
+                    logging.info(f'IMAP listening has started for {self.mailbox}')
 
                     if not null_uidnext_uidvalidity:
                         self.fetch_newest_emails()
@@ -228,8 +228,10 @@ class EmailNotifier:
                 uidnext, uidvalidity = self.get_uidnext_uidvalidity(imap_client)
                 assert self.uidnext is not None
                 assert self.uidvalidity is not None
-                # ToDo deal with UIDVALIDITY changes
-                self.uidvalidity = uidvalidity
+                if uidvalidity != self.uidvalidity:
+                   logging.warning(f"UIDVALIDITY has changed!  This means that mailbox {self.mailbox} has experienced a signifigant change.")
+                   self.uidnext, self.uidvalidity = uidnext, uidvalidity
+                   return
 
                 result, msg_data = imap_client.uid('FETCH', f'{self.uidnext}:*', '(RFC822)')
                 self.uidnext = uidnext
@@ -239,6 +241,7 @@ class EmailNotifier:
                     if data is None or data == b')':
                         continue
                     metadata, raw_email = data
+                    # ToDo should metadata be sent to the observer?
                     message = email.message_from_bytes(raw_email)
                     messages.append(message)
 
