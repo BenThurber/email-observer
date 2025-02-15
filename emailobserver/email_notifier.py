@@ -152,6 +152,7 @@ class EmailNotifier:
 
         self.imapClientManager = None
         self.killer = GracefulKiller()
+        self._fetch_lock = threading.Lock()
         self.observers = []
         self.uidnext = None
         self.uidvalidity = None
@@ -196,9 +197,9 @@ class EmailNotifier:
                     if imap_client is not None:
                         imap_client.close()
                         imap_client.logout()  # This is important!
+                    sys.stdout.flush()  # probably not needed
                     logging.info('IMAP listening has stopped, conn cleanup was run for: Listener: {}, Client: {}'
                                  .format(self.imapClientManager is not None, imap_client is not None))
-                    sys.stdout.flush()  # probably not needed
             except imaplib2.IMAP4.abort:
                 retry_delay_s = 1
                 sleep_unless(retry_delay_s, lambda: self.killer.kill_now)
@@ -218,39 +219,40 @@ class EmailNotifier:
         return int(uidnext), int(uidvalidity)  # UIDNEXT and UIDVALIDITY will always be integers as per (RFC 3501)
 
     def fetch_newest_emails(self):
-        imap_client = None
-        try:
-            imap_client = imaplib2.IMAP4_SSL(self.imap_server, self.imap_port)
-            imap_client.login(self.email_user, self.email_password)
-            imap_client.select(self.mailbox)
-            uidnext, uidvalidity = self.get_uidnext_uidvalidity(imap_client)
-            assert self.uidnext is not None
-            assert self.uidvalidity is not None
-            # ToDo deal with UIDVALIDITY changes
-            self.uidvalidity = uidvalidity
+        with self._fetch_lock:
+            imap_client = None
+            try:
+                imap_client = imaplib2.IMAP4_SSL(self.imap_server, self.imap_port)
+                imap_client.login(self.email_user, self.email_password)
+                imap_client.select(self.mailbox)
+                uidnext, uidvalidity = self.get_uidnext_uidvalidity(imap_client)
+                assert self.uidnext is not None
+                assert self.uidvalidity is not None
+                # ToDo deal with UIDVALIDITY changes
+                self.uidvalidity = uidvalidity
 
-            result, msg_data = imap_client.uid('FETCH', f'{self.uidnext}:*', '(RFC822)')
-            self.uidnext = uidnext
+                result, msg_data = imap_client.uid('FETCH', f'{self.uidnext}:*', '(RFC822)')
+                self.uidnext = uidnext
 
-            messages = []
-            for data in msg_data:
-                if data is None or data == b')':
-                    continue
-                metadata, raw_email = data
-                message = email.message_from_bytes(raw_email)
-                messages.append(message)
+                messages = []
+                for data in msg_data:
+                    if data is None or data == b')':
+                        continue
+                    metadata, raw_email = data
+                    message = email.message_from_bytes(raw_email)
+                    messages.append(message)
 
-            if len(messages) > 0:
-                for observer in self.observers:
-                    observer.on_mail_received(messages)
+                if len(messages) > 0:
+                    for observer in self.observers:
+                        observer.on_mail_received(messages)
 
-        except (imaplib2.IMAP4.error, socket.gaierror) as e:
-            logging.error(f"Failed to connect to IMAP server: {e}")
+            except (imaplib2.IMAP4.error, socket.gaierror) as e:
+                logging.error(f"Failed to connect to IMAP server: {e}")
 
-        finally:
-            if imap_client is not None:
-                imap_client.close()
-                imap_client.logout()  # This is important!
+            finally:
+                if imap_client is not None:
+                    imap_client.close()
+                    imap_client.logout()  # This is important!
 
 
 if __name__ == '__main__':
