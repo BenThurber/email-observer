@@ -230,9 +230,10 @@ class EmailNotifier:
                 assert self.uidnext is not None
                 assert self.uidvalidity is not None
                 if uidvalidity != self.uidvalidity:
-                   logging.warning(f"UIDVALIDITY has changed!  This means that mailbox {self.mailbox} has experienced a signifigant change.")
-                   self.uidnext, self.uidvalidity = uidnext, uidvalidity
-                   return
+                    logging.warning(f"UIDVALIDITY has changed!  This means that mailbox {self.mailbox} has experienced "
+                                    "a significant change.")
+                    self.uidnext, self.uidvalidity = uidnext, uidvalidity
+                    return
 
                 result, msg_data = imap_client.uid('FETCH', f'{self.uidnext}:*', '(RFC822)')
                 self.uidnext = uidnext
