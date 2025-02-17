@@ -126,7 +126,6 @@ class EmailNotifier:
     more emails are received, all observers are notified by calling their
     on_mail_received method."""
     def __init__(self, email_user=None, email_password=None, imap_server=None, mailbox='Inbox', imap_port=None, **kwargs):
-        self._first = True
         self.email_user = email_user
         self.email_password = email_password
         self.imap_server = imap_server
@@ -182,7 +181,7 @@ class EmailNotifier:
 
                     self.imapClientManager = IMAPClientManager(imap_client, self.fetch_newest_emails)  # Start the Idler thread
                     self.imapClientManager.start()
-                    logging.info(f'IMAP listening has started for "{self.mailbox}"')
+                    logging.info(f'IMAP listening has started for {self.email_user} "{self.mailbox}"')
 
                     if not null_uidnext_uidvalidity:
                         self.fetch_newest_emails()
@@ -202,7 +201,7 @@ class EmailNotifier:
                         imap_client.close()
                         imap_client.logout()  # This is important!
                     sys.stdout.flush()  # probably not needed
-                    logging.info('IMAP listening has stopped, conn cleanup was run for: Listener: {}, Client: {}'
+                    logging.info('IMAP listening has stopped for {self.email_user} "{self.mailbox}", conn cleanup was run for: Listener: {}, Client: {}'
                                  .format(self.imapClientManager is not None, imap_client is not None))
             except imaplib2.IMAP4.abort:
                 retry_delay_s = 1
@@ -210,7 +209,7 @@ class EmailNotifier:
                 if self.killer.kill_now:
                     break
             except socket.gaierror as e:
-                logging.error(f"Failed to connect to IMAP server: {e}")
+                logging.error(f"Failed to connect to IMAP server {self.imap_server}: {e}")
                 break
 
     def get_uidnext_uidvalidity(self, imap_client):
@@ -233,8 +232,9 @@ class EmailNotifier:
                 assert self.uidnext is not None
                 assert self.uidvalidity is not None
                 if uidvalidity != self.uidvalidity:
-                    logging.warning(f"UIDVALIDITY has changed!  This means that mailbox {self.mailbox} has experienced "
-                                    "a significant change.")
+                    logging.warning("UIDVALIDITY has changed!  This means that mailbox "
+                                    f"{self.mailbox} for user {self.email_user} has "
+                                    "experienced a significant change.")
                     self.uidnext, self.uidvalidity = uidnext, uidvalidity
                     return
 
@@ -255,7 +255,7 @@ class EmailNotifier:
                         observer.on_mail_received(messages)
 
             except (imaplib2.IMAP4.error, socket.gaierror) as e:
-                logging.error(f"Failed to connect to IMAP server: {e}")
+                logging.error(f"Failed to connect to IMAP server {self.imap_server}: {e}")
 
             finally:
                 if imap_client is not None:
