@@ -171,6 +171,9 @@ class EmailNotifier:
                 try:
                     imap_client = imaplib2.IMAP4_SSL(self.imap_server, self.imap_port)
                     imap_client.login(self.email_user, self.email_password)
+                    if 'IDLE' not in imap_client.capabilities:
+                        logging.error("IMAP server does not support IDLE which is required for EmailNotifier to work.")
+                        return
                     imap_client.select(self.mailbox)  # We need to get out of the AUTH state, so we just select the INBOX.
 
                     null_uidnext_uidvalidity = self.uidnext is None or self.uidvalidity is None
@@ -179,7 +182,7 @@ class EmailNotifier:
 
                     self.imapClientManager = IMAPClientManager(imap_client, self.fetch_newest_emails)  # Start the Idler thread
                     self.imapClientManager.start()
-                    logging.info(f'IMAP listening has started for {self.mailbox}')
+                    logging.info(f'IMAP listening has started for "{self.mailbox}"')
 
                     if not null_uidnext_uidvalidity:
                         self.fetch_newest_emails()
