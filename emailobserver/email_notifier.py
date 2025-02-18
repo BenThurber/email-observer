@@ -1,5 +1,5 @@
-# coding=utf-8
 import os
+import re
 import sys
 import time
 import email
@@ -39,7 +39,7 @@ class EmailObserver(ABC):
             ...
     """
     @abstractmethod
-    def on_mail_received(self, new_messages: list[Message], message_list: list[Message]):
+    def on_mail_received(self, new_messages: list[Message]):
         pass
 
 
@@ -125,25 +125,24 @@ class EmailNotifier:
     """This is the subject which maintains a list of observers.  When one or
     more emails are received, all observers are notified by calling their
     on_mail_received method."""
-    def __init__(self, imap_server=None, email_user=None, email_password=None, message_list_len=10, mailbox='Inbox', imap_port=None, **kwargs):
-        self._first = True
-        self.imap_server = imap_server
+    def __init__(self, email_user=None, email_password=None, imap_server=None, mailbox='Inbox', imap_port=None, **kwargs):
         self.email_user = email_user
         self.email_password = email_password
-        self.message_list_len = message_list_len
+        self.imap_server = imap_server
         self.mailbox = mailbox
         self.imap_port = imap_port
 
         # Load email server credentials from environment variables if not provided
-        imap_server_env = kwargs.get("imap_server_env") or "EMAIL_OBSERVER_IMAP_SERVER"
         email_user_env = kwargs.get("email_user_env") or "EMAIL_OBSERVER_USER"
         email_password_env = kwargs.get("email_password_env") or "EMAIL_OBSERVER_PASSWORD"
-        if not self.imap_server:
-            self.imap_server = os.getenv(imap_server_env)
+        imap_server_env = kwargs.get("imap_server_env") or "EMAIL_OBSERVER_IMAP_SERVER"
         if not self.email_user:
             self.email_user = os.getenv(email_user_env)
         if not self.email_password:
             self.email_password = os.getenv(email_password_env)
+        if not self.imap_server:
+            self.imap_server = os.getenv(imap_server_env)
+
         if not all((self.imap_server, self.email_user, self.email_password)):
             raise EnvironmentError(
                 "{}, {}, and {} must be set as environment variables, or values must be passed in as arguments to {} constructor.".format(
@@ -153,9 +152,10 @@ class EmailNotifier:
 
         self.imapClientManager = None
         self.killer = GracefulKiller()
+        self._fetch_lock = threading.Lock()
         self.observers = []
-        self.prev_message_list_dict = {}
-        self.prev_uids = set()
+        self.uidnext = None
+        self.uidvalidity = None
 
     def register_observer(self, observer: EmailObserver):
         if isinstance(observer, EmailObserver):
@@ -170,13 +170,21 @@ class EmailNotifier:
                 try:
                     imap_client = imaplib2.IMAP4_SSL(self.imap_server, self.imap_port)
                     imap_client.login(self.email_user, self.email_password)
+                    if 'IDLE' not in imap_client.capabilities:
+                        logging.error("IMAP server does not support IDLE which is required for EmailNotifier to work.")
+                        return
                     imap_client.select(self.mailbox)  # We need to get out of the AUTH state, so we just select the INBOX.
+
+                    null_uidnext_uidvalidity = self.uidnext is None or self.uidvalidity is None
+                    if null_uidnext_uidvalidity:
+                        self.uidnext, self.uidvalidity = self.get_uidnext_uidvalidity(imap_client)
+
                     self.imapClientManager = IMAPClientManager(imap_client, self.fetch_newest_emails)  # Start the Idler thread
                     self.imapClientManager.start()
-                    logging.info('IMAP listening has started')
+                    logging.info(f'IMAP listening has started for {self.email_user} "{self.mailbox}"')
 
-                    # Helps update the timestamp, so that on event only new emails are sent with notifications
-                    self.fetch_newest_emails()
+                    if not null_uidnext_uidvalidity:
+                        self.fetch_newest_emails()
 
                     while not self.killer.kill_now and not self.imapClientManager.needs_reset.is_set():
                         time.sleep(1)
@@ -192,70 +200,68 @@ class EmailNotifier:
                     if imap_client is not None:
                         imap_client.close()
                         imap_client.logout()  # This is important!
-                    logging.info('IMAP listening has stopped, conn cleanup was run for: Listener: {}, Client: {}'
-                                 .format(self.imapClientManager is not None, imap_client is not None))
                     sys.stdout.flush()  # probably not needed
-            except imaplib2.IMAP4.abort as e:
+                    logging.info('IMAP listening has stopped for {} "{}", conn cleanup was run for: Listener: {}, Client: {}'
+                                 .format(self.email_user, self.mailbox,
+                                         self.imapClientManager is not None, imap_client is not None))
+            except imaplib2.IMAP4.abort:
                 retry_delay_s = 1
                 sleep_unless(retry_delay_s, lambda: self.killer.kill_now)
                 if self.killer.kill_now:
                     break
             except socket.gaierror as e:
-                logging.error(f"Failed to connect to IMAP server: {e}")
+                logging.error(f"Failed to connect to IMAP server {self.imap_server}: {e}")
                 break
 
+    def get_uidnext_uidvalidity(self, imap_client):
+        result, response = imap_client.status(self.mailbox, "(UIDNEXT UIDVALIDITY)")
+        content = response[0].decode()
+        # ToDo look into using parsing from imapclient??  Add error handling.
+        pattern = r'.* \(.*{} (\d+).*\)'
+        uidnext = re.match(pattern.format('UIDNEXT'), content).group(1)
+        uidvalidity = re.match(pattern.format('UIDVALIDITY'), content).group(1)
+        return int(uidnext), int(uidvalidity)  # UIDNEXT and UIDVALIDITY will always be integers as per (RFC 3501)
+
     def fetch_newest_emails(self):
-        imap_client = None
-        try:
-            imap_client = imaplib2.IMAP4_SSL(self.imap_server, self.imap_port)
-            imap_client.login(self.email_user, self.email_password)
-            imap_client.select(self.mailbox)
+        with self._fetch_lock:
+            imap_client = None
+            try:
+                imap_client = imaplib2.IMAP4_SSL(self.imap_server, self.imap_port)
+                imap_client.login(self.email_user, self.email_password)
+                imap_client.select(self.mailbox)
+                uidnext, uidvalidity = self.get_uidnext_uidvalidity(imap_client)
+                assert self.uidnext is not None
+                assert self.uidvalidity is not None
+                if uidvalidity != self.uidvalidity:
+                    logging.warning("UIDVALIDITY has changed!  This means that mailbox "
+                                    f"{self.mailbox} for user {self.email_user} has "
+                                    "experienced a significant change.")
+                    self.uidnext, self.uidvalidity = uidnext, uidvalidity
+                    return
 
-            result, data = imap_client.uid('SEARCH', None, 'ALL')
-            uids = data[0].split()
-            all_uids = {int(b) for b in data[0].split()}
+                result, msg_data = imap_client.uid('FETCH', f'{self.uidnext}:*', '(RFC822)')
+                self.uidnext = uidnext
 
-            uids_to_fetch = reversed([int(b) for b in data[0].split()[-self.message_list_len:]])
+                messages = []
+                for data in msg_data:
+                    if data is None or data == b')':
+                        continue
+                    metadata, raw_email = data
+                    # ToDo should metadata be sent to the observer?
+                    message = email.message_from_bytes(raw_email)
+                    messages.append(message)
 
-            message_list_dict = {uid: self.prev_message_list_dict.get(uid) or self.fetch_uid(imap_client, uid) for uid in uids_to_fetch}
-            message_list = list(message_list_dict.values())
+                if len(messages) > 0:
+                    for observer in self.observers:
+                        observer.on_mail_received(messages)
 
-            if self._first:
-                self._first = False
-                new_messages = []
-            else:
-                new_uids = all_uids.difference(self.prev_uids)  # Should be very fast, even for a large mailbox.
-                new_messages = [message_list_dict.get(uid) or self.fetch_uid(imap_client, uid) for uid in new_uids]
+            except (imaplib2.IMAP4.error, socket.gaierror) as e:
+                logging.error(f"Failed to connect to IMAP server {self.imap_server}: {e}")
 
-            # IDLE is triggered when the read status is changed on an email.
-            # This check prevents observers from being notified.
-            if message_list_dict.keys() == self.prev_message_list_dict.keys():
-                return
-
-            self.prev_message_list_dict = message_list_dict
-            self.prev_uids = all_uids
-
-            for observer in self.observers:
-                observer.on_mail_received(new_messages, message_list)
-
-        except (imaplib2.IMAP4.error, socket.gaierror) as e:
-            logging.error(f"Failed to connect to IMAP server: {e}")
-
-        finally:
-            if imap_client is not None:
-                imap_client.close()
-                imap_client.logout()  # This is important!
-
-    @staticmethod
-    def fetch_uid(imap_client, uid: int) -> Message:
-        """Fetches the email message with the given UID from the IMAP server."""
-        if not isinstance(uid, int):
-            raise TypeError(f"uid {uid} must be an integer, not {uid.__class__.__name__}")
-        result, msg_data = imap_client.uid('FETCH', str(uid), '(RFC822)')
-        # ToDo add error handling for non 'OK' result and None msg_data.
-        raw_email = msg_data[0][1].decode("utf-8")
-        message = email.message_from_string(raw_email)
-        return message
+            finally:
+                if imap_client is not None:
+                    imap_client.close()
+                    imap_client.logout()  # This is important!
 
 
 if __name__ == '__main__':
