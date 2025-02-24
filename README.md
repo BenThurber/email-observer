@@ -61,6 +61,28 @@ notifier = EmailNotifier(imap_server_env='EMAIL_OBSERVER_IMAP_SERVER',
                          env_password='EMAIL_OBSERVER_PASSWORD')
 ```
 
+### 3.4. Saving State Between Sessions
+
+To track new emails across sessions, the `UIDNEXT` and `UIDVALIDITY` parameters can be stored on disk.  This can be achieved by overriding the `load_state` and `save_state` methods of `EmailNotifier`.
+
+```python
+from emailobserver import EmailNotifier
+import json
+
+class CustomEmailNotifier(EmailNotifier):
+    def load_state(self) -> dict:
+        try:
+            with open('state.json', 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+
+    def save_state(self, state: dict):
+        with open('state.json', 'w') as f:
+            json.dump(state, f)
+```
+
+When `CustomEmailNotifier` starts, it will first fetch all new messages received since the previous session.
 
 #### Acknowledgements and sources
 - https://github.com/Elijas/email-notifier

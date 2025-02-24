@@ -154,8 +154,17 @@ class EmailNotifier:
         self.killer = GracefulKiller()
         self._fetch_lock = threading.Lock()
         self.observers = []
-        self.uidnext = None
-        self.uidvalidity = None
+        saved_state = self.load_state()
+        self.uidnext = saved_state.get("uidnext")
+        self.uidvalidity = saved_state.get("uidvalidity")
+
+    def load_state(self) -> dict:
+        """This method should be overridden to load the state of the EmailNotifier from a file or database."""
+        return {}
+
+    def save_state(self, state: dict):
+        """This method should be overridden to save the state of the EmailNotifier to a file or database."""
+        pass
 
     def register_observer(self, observer: EmailObserver):
         if isinstance(observer, EmailObserver):
@@ -194,6 +203,7 @@ class EmailNotifier:
                     elif self.killer.kill_now:
                         break
                 finally:
+                    self.save_state({"uidnext": self.uidnext, "uidvalidity": self.uidvalidity})
                     if self.imapClientManager is not None:
                         self.imapClientManager.stop()  # Had to do this stuff in a try-finally, since some testing went a little wrong.
                         self.imapClientManager.join()
@@ -280,8 +290,14 @@ if __name__ == '__main__':
     # Add the handler to the logger
     logger.addHandler(console_handler)
 
+    class TestObserver(EmailObserver):
+        def on_mail_received(self, new_messages):
+            for msg in new_messages:
+                logging.info(f"Received email with subject: {decode_mime_text(msg['Subject'])}")
+
     try:
         en = EmailNotifier()
+        en.register_observer(TestObserver())
         en.start()
     except EnvironmentError as _e:
         logging.error(_e)
