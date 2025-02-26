@@ -153,10 +153,14 @@ class EmailNotifier:
         self.imapClientManager = None
         self.killer = GracefulKiller()
         self._fetch_lock = threading.Lock()
+        self._save_lock = threading.Lock()
         self.observers = []
         saved_state = self.load_state()
         self.uidnext = saved_state.get("uidnext")
         self.uidvalidity = saved_state.get("uidvalidity")
+
+    def state(self):
+        return {"uidnext": self.uidnext, "uidvalidity": self.uidvalidity}
 
     def load_state(self) -> dict:
         """This method should be overridden to load the state of the EmailNotifier from a file or database."""
@@ -187,6 +191,8 @@ class EmailNotifier:
                     null_uidnext_uidvalidity = self.uidnext is None or self.uidvalidity is None
                     if null_uidnext_uidvalidity:
                         self.uidnext, self.uidvalidity = self.get_uidnext_uidvalidity(imap_client)
+                        with self._save_lock:
+                            self.save_state(self.state())
 
                     self.imapClientManager = IMAPClientManager(imap_client, self.fetch_newest_emails)  # Start the Idler thread
                     self.imapClientManager.start()
@@ -203,7 +209,8 @@ class EmailNotifier:
                     elif self.killer.kill_now:
                         break
                 finally:
-                    self.save_state({"uidnext": self.uidnext, "uidvalidity": self.uidvalidity})
+                    with self._save_lock:
+                        self.save_state(self.state())
                     if self.imapClientManager is not None:
                         self.imapClientManager.stop()  # Had to do this stuff in a try-finally, since some testing went a little wrong.
                         self.imapClientManager.join()
@@ -263,7 +270,12 @@ class EmailNotifier:
 
                 if len(messages) > 0:
                     for observer in self.observers:
-                        observer.on_mail_received(messages)
+                        try:
+                            observer.on_mail_received(messages)
+                        except Exception as ex:
+                            logging.error(f"Error in observer {observer.__class__.__name__} callback: {ex}")
+                    with self._save_lock:
+                        self.save_state(self.state())
 
             except (imaplib2.IMAP4.error, socket.gaierror) as e:
                 logging.error(f"Failed to connect to IMAP server {self.imap_server}: {e}")
