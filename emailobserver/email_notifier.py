@@ -153,6 +153,7 @@ class EmailNotifier:
         self.imapClientManager = None
         self.killer = GracefulKiller()
         self._fetch_lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self.observers = []
         saved_state = self.load_state()
         self.uidnext = saved_state.get("uidnext")
@@ -203,7 +204,8 @@ class EmailNotifier:
                     elif self.killer.kill_now:
                         break
                 finally:
-                    self.save_state({"uidnext": self.uidnext, "uidvalidity": self.uidvalidity})
+                    with self._write_lock:
+                        self.save_state({"uidnext": self.uidnext, "uidvalidity": self.uidvalidity})
                     if self.imapClientManager is not None:
                         self.imapClientManager.stop()  # Had to do this stuff in a try-finally, since some testing went a little wrong.
                         self.imapClientManager.join()
@@ -262,6 +264,8 @@ class EmailNotifier:
                     messages.append(message)
 
                 if len(messages) > 0:
+                    with self._write_lock:
+                        self.save_state({"uidnext": self.uidnext, "uidvalidity": self.uidvalidity})
                     for observer in self.observers:
                         observer.on_mail_received(messages)
 
