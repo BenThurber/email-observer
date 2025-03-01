@@ -18,19 +18,19 @@ pip install .
 
 ### 3.2. Basic Usage
 
-An [observer pattern](https://en.wikipedia.org/wiki/Observer_pattern) is used for processing incoming emails.  To receive email events, a class must implement the on_mail_received method of the EmailObserver class.  This callback is triggered when one or more new messages arrive, or are moved to the mailbox.
+An [observer pattern](https://en.wikipedia.org/wiki/Observer_pattern) is used for processing incoming emails.  To receive email events, a class must implement the on_mail_received method of the AbstractEmailObserver class.  This callback is triggered when one or more new messages arrive, or are moved to the mailbox.
 
 Each new message is an `email.message.Message` object from the built-in [email](https://docs.python.org/3/library/email.html) module.
 
 ```python
-from emailobserver import EmailNotifier, EmailObserver
+from emailobserver import EmailNotifier, AbstractEmailObserver
 from email.message import Message
 
-class ConcreteObserver(EmailObserver):
+class EmailObserver(AbstractEmailObserver):
     def on_mail_received(self, new_messages: list[Message]):
         print(len(new_messages), "New messages received.")
 
-observer = ConcreteObserver()
+observer = EmailObserver()
 
 notifier = EmailNotifier('imap.someserver.com', 'someuser@someserver.com', 'password')
 notifier.register_observer(observer)

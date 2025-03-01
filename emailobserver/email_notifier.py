@@ -29,12 +29,12 @@ def decode_mime_text(s):
         for m in mime_text_encoding_tuples)
 
 
-class EmailObserver(ABC):
+class AbstractEmailObserver(ABC):
     """This is an Abstract class which serves as an interface.  Any classes
     that wish to receive notifications of new emails can implement this class,
     possibly using multiple inheritance.  For example:
 
-    class MyClass(MyClassSuperclass, EmailObserver):
+    class MyClass(MyClassSuperclass, AbstractEmailObserver):
         def on_mail_received(...):
             ...
     """
@@ -170,11 +170,11 @@ class EmailNotifier:
         """This method should be overridden to save the state of the EmailNotifier to a file or database."""
         pass
 
-    def register_observer(self, observer: EmailObserver):
-        if isinstance(observer, EmailObserver):
+    def register_observer(self, observer: AbstractEmailObserver):
+        if isinstance(observer, AbstractEmailObserver):
             self.observers.append(observer)
         else:
-            raise TypeError(f"observer of type {observer.__class__.__name__} is not a subclass of EmailObserver.")
+            raise TypeError(f"observer of type {observer.__class__.__name__} is not a subclass of AbstractEmailObserver.")
 
     def start(self):
         imap_client = None
@@ -302,7 +302,7 @@ if __name__ == '__main__':
     # Add the handler to the logger
     logger.addHandler(console_handler)
 
-    class TestObserver(EmailObserver):
+    class TestObserver(AbstractEmailObserver):
         def on_mail_received(self, new_messages):
             for msg in new_messages:
                 logging.info(f"Received email with subject: {decode_mime_text(msg['Subject'])}")
