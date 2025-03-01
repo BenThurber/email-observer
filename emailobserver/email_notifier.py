@@ -150,8 +150,8 @@ class EmailNotifier:
                 )
             )
 
-        self.imapClientManager = None
-        self.killer = GracefulKiller()
+        self.imap_client_manager = None
+        self._killer = GracefulKiller()
         self._fetch_lock = threading.Lock()
         self._save_lock = threading.Lock()
         self.observers = []
@@ -194,37 +194,37 @@ class EmailNotifier:
                         with self._save_lock:
                             self.save_state(self.state())
 
-                    self.imapClientManager = IMAPClientManager(imap_client, self.fetch_newest_emails)  # Start the Idler thread
-                    self.imapClientManager.start()
+                    self.imap_client_manager = IMAPClientManager(imap_client, self.fetch_newest_emails)  # Start the Idler thread
+                    self.imap_client_manager.start()
                     logging.info(f'IMAP listening has started for {self.email_user} "{self.mailbox}"')
 
                     if not null_uidnext_uidvalidity:
                         self.fetch_newest_emails()
 
-                    while not self.killer.kill_now and not self.imapClientManager.needs_reset.is_set():
+                    while not self._killer.kill_now and not self.imap_client_manager.needs_reset.is_set():
                         time.sleep(1)
 
-                    if self.imapClientManager.needs_reset.is_set():
-                        raise self.imapClientManager.needs_reset_exc  # raises instance of imaplib2.IMAP4.abort
-                    elif self.killer.kill_now:
+                    if self.imap_client_manager.needs_reset.is_set():
+                        raise self.imap_client_manager.needs_reset_exc  # raises instance of imaplib2.IMAP4.abort
+                    elif self._killer.kill_now:
                         break
                 finally:
                     with self._save_lock:
                         self.save_state(self.state())
-                    if self.imapClientManager is not None:
-                        self.imapClientManager.stop()  # Had to do this stuff in a try-finally, since some testing went a little wrong.
-                        self.imapClientManager.join()
+                    if self.imap_client_manager is not None:
+                        self.imap_client_manager.stop()  # Had to do this stuff in a try-finally, since some testing went a little wrong.
+                        self.imap_client_manager.join()
                     if imap_client is not None:
                         imap_client.close()
                         imap_client.logout()  # This is important!
                     sys.stdout.flush()  # probably not needed
                     logging.info('IMAP listening has stopped for {} "{}", conn cleanup was run for: Listener: {}, Client: {}'
                                  .format(self.email_user, self.mailbox,
-                                         self.imapClientManager is not None, imap_client is not None))
+                                         self.imap_client_manager is not None, imap_client is not None))
             except imaplib2.IMAP4.abort:
                 retry_delay_s = 1
-                sleep_unless(retry_delay_s, lambda: self.killer.kill_now)
-                if self.killer.kill_now:
+                sleep_unless(retry_delay_s, lambda: self._killer.kill_now)
+                if self._killer.kill_now:
                     break
             except socket.gaierror as e:
                 logging.error(f"Failed to connect to IMAP server {self.imap_server}: {e}")
