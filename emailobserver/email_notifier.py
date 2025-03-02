@@ -110,14 +110,15 @@ class IMAPClientManager(object):
 
 
 class GracefulKiller:
-    kill_now = False
 
     def __init__(self):
+        self.kill_now = False
         signal.signal(signal.SIGINT, self.exit_gracefully)
         signal.signal(signal.SIGTERM, self.exit_gracefully)
 
     def exit_gracefully(self, signum, frame):
-        logging.info("Caught kill signal: {}".format(signum))
+        if signum is not None:
+            logging.info("Caught kill signal: {}".format(signum))
         self.kill_now = True
 
 
@@ -177,6 +178,7 @@ class EmailNotifier:
             raise TypeError(f"observer of type {observer.__class__.__name__} is not a subclass of AbstractEmailObserver.")
 
     def start(self):
+        self._killer.kill_now = False
         imap_client = None
         while True:
             try:
@@ -229,6 +231,9 @@ class EmailNotifier:
             except socket.gaierror as e:
                 logging.error(f"Failed to connect to IMAP server {self.imap_server}: {e}")
                 break
+
+    def stop(self):
+        self._killer.exit_gracefully(None, None)
 
     def get_uidnext_uidvalidity(self, imap_client):
         result, response = imap_client.status(self.mailbox, "(UIDNEXT UIDVALIDITY)")
